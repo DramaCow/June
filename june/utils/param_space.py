@@ -19,21 +19,23 @@ class ParamSpace:
         f: Callable[[Domain], Callable[[chex.PRNGKey, ...], ParamSpace]],
         rng: chex.PRNGKey,
         *args: chex.ArrayTree,
-        cond_fn: Optional[Callable[[Domain], bool]] = None,
     ):
-        return make_domain_apply(self.params, f, cond_fn)(rng, *args)
+        return make_domain_apply(self.params, f)(rng, *args)
 
     def sample(self, rng: chex.PRNGKey) -> ParamTreeState:
         return self.domain_apply(lambda domain: domain.sample, rng)
     
     def mutate(self, rng: chex.PRNGKey, params: ParamTreeState) -> ParamTreeState:
-        return self.domain_apply(lambda domain: domain.mutate, rng, params.params, cond_fn=lambda domain: domain.is_mutable)
+        def mutate_leaf(domain):
+            if domain.is_mutable:
+                return domain.mutate
+            return lambda rng, x: x
+        return self.domain_apply(mutate_leaf, rng, params.params)
 
 
 def make_domain_apply(
     params: ParamSpace,
-    f: Callable[[Domain], Callable[[chex.PRNGKey, ...], ParamSpace]],
-    cond_fn: Optional[Callable[[Domain], bool]] = None,
+    f: Callable[[Domain], Callable[[chex.PRNGKey, ...], ParamSpace]]
 ):
     """
     Constructs a function that given an rng and arbitrary pytrees
@@ -42,15 +44,10 @@ def make_domain_apply(
     the condition function cond_fn).
     """
     
-    # In principle, this can be rolled into f as required,
-    # but this adds a bit of convenience. Consider removing.
-    if cond_fn is None:
-        cond_fn = lambda _: True
-    
     def op_leaf(leaf):
-        if isinstance(leaf, Domain) and cond_fn(leaf):
+        if isinstance(leaf, Domain):
             return f(leaf)
-        return lambda rg, *_: leaf
+        return lambda rg, *xs: leaf
     
     def is_leaf(x):
         return isinstance(x, Domain) or isinstance(x, ParamSpace)

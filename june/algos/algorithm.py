@@ -34,6 +34,9 @@ class AlgorithmState:
         rng, _rng = jax.random.split(rng)
         return rng, self.replace(rng=_rng) # TODO: prefer the output order to be the other way around for some reason
 
+    def set_rng(self, rng):
+        return self.replace(rng=rng)
+
 class Algorithm:
     def set_resource(self, resource: Union[float, int]):
         # for wrappers controlling resource allocation

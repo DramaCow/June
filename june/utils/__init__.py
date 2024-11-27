@@ -1,1 +1,1 @@
-from .train_state import TrainState
+from .state_storage import Storage

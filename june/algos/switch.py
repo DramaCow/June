@@ -23,6 +23,16 @@ class SwitchParams(AlgorithmParams):
 class SwitchState(AlgorithmState):
     states: List[chex.ArrayTree]
 
+    def set_rng(self, rng):
+        rngs = jax.random.split(rng, len(self.states))
+        states = self.states
+        for i, rng in enumerate(rngs):
+            if hasattr(states[i], "set_rng"):
+                states[i] = states[i].set_rng(rng)
+            else:
+                states[i] = states[i].replace(rng=rng)
+        return self.replace(states=states)
+
 class Switch(Algorithm):
     algos: List[Algorithm]
     
@@ -72,6 +82,17 @@ class Switch(Algorithm):
             ph_evaluation = jax.tree.map(lambda x: jnp.empty(x.shape, dtype=x.dtype), eval_shape)
             evaluations.append(ph_evaluation)
         return evaluations
+
+    def get_fitness(self, algo_state, params, evaluations):
+        evaluations_array = jnp.asarray(evaluations)
+        index = params.index
+        return evaluations_array[index].mean()
+
+    def unwrap(self, algo_state, algo_params):
+        algo = self.algos[algo_params.index]
+        state = algo_state.states[algo_params.index]
+        params = algo_params.params[algo_params.index]
+        return algo, state, params
         
 # ==================
 # REGISTER ALGORITHM

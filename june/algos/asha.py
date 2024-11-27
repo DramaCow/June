@@ -7,6 +7,7 @@ from june.utils.param_space import ParamSpace
 from copy import deepcopy
 import jax.numpy as jnp
 import numpy as np
+from june.utils import Storage
 
 @struct.dataclass
 class ASHAParams(AlgorithmParams):
@@ -24,6 +25,7 @@ class ASHAState(AlgorithmState):
     # === PURELY FOR DEBUGGING ===
     step_count: int
     worker_history: chex.Array
+    storage: Storage
 
 class ASHA(Algorithm):
     algo: Algorithm
@@ -90,6 +92,12 @@ class ASHA(Algorithm):
         # make evaluations array that is ultimately returned
         evaluation_shape = jax.eval_shape(self.algo.train, *jax.tree.map(lambda x: x[0], (states, pop_params.value)))[1]
         evaluations = jax.tree.map(lambda x: jnp.empty((self.num_initial_trials, self.num_steps, *x.shape), dtype=x.dtype), evaluation_shape)
+
+        storage = Storage.create({
+            "state": jax.tree.map(lambda x: x[0], states),
+            "params": jax.tree.map(lambda x: x[0], pop_params.value),
+            "fitness": 0., 
+        }, self.num_workers * self.num_steps)
         
         return ASHAState(
             rng=rng,
@@ -104,8 +112,9 @@ class ASHA(Algorithm):
             # === PURELY FOR DEBUGGING ===
             step_count=0,
             worker_history=jnp.full((self.num_steps, self.num_workers), -1, dtype=jnp.int32),
+            storage=storage,
         )
-    
+
     def train_impl(self, algo_state: ASHAState, params: ASHAParams) -> chex.ArrayTree:
         def step(algo_state, _):
             inds, promoted = self.get_jobs(algo_state)
@@ -120,20 +129,19 @@ class ASHA(Algorithm):
             states = jax.tree.map(lambda x, y: x.at[inds].set(y), algo_state.states, worker_states)
             
             # record evaluations
-            evaluations = algo_state.evaluations.at[inds, algo_state.trial_steps[inds]].set(worker_evals)
+            evaluations = jax.tree.map(lambda x, y: x.at[inds, algo_state.trial_steps[inds]].set(y), algo_state.evaluations, worker_evals)
             
             # update rungs and trial steps
             rungs = algo_state.rungs[inds] + promoted
             trial_steps = algo_state.trial_steps[inds] + 1
             # rungs = algo_state.rungs[inds] + (trial_steps == self._steps_required(algo_state.rungs[inds]))
+
+            worker_fitness = jax.vmap(self.algo.get_fitness)(worker_states, worker_params.value, worker_evals)
+            storage = algo_state.storage.extend({"state": worker_states, "params": worker_params.value, "fitness": worker_fitness})
             
             # if trial has reached the required steps, then free the worker
             worker_free = trial_steps == self._steps_required(rungs)
-            worker_fitness = jnp.where(
-                worker_free,
-                worker_evals.reshape(self.num_workers, -1).mean(axis=-1), # TODO: rolling average?
-                -jnp.inf,
-            )
+            worker_fitness = jnp.where(worker_free, worker_fitness, -jnp.inf)
             worker_trial_id = jnp.where(worker_free, -1, inds)
             
             fitness = algo_state.fitness.at[rungs, inds].set(worker_fitness)
@@ -148,12 +156,19 @@ class ASHA(Algorithm):
                 worker_trial_id=worker_trial_id,
                 step_count=algo_state.step_count+1,
                 evaluations=evaluations,
+                storage=storage,
             )
             
             # self.eval_callback(evaluations)
             return algo_state, None
         algo_state, _ = jax.lax.scan(step, algo_state, None, length=self.num_steps)
         return algo_state, algo_state.evaluations
+
+    def get_best(self, algo_state, algo_params):
+        algo = self.algo
+        index = algo_state.trial_steps.argmax()
+        state, params = jax.tree.map(lambda x: x[index], (algo_state.states, algo_state.params.value))
+        return algo, state, params
     
     def get_jobs(self, algo_state: ASHAState):
         trial_ready = (algo_state.trial_steps == self._steps_required(algo_state.rungs))

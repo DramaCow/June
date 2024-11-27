@@ -14,6 +14,8 @@ import jax
 from flax import struct
 from jax import numpy as jnp
 
+from june.utils import Storage
+
 @struct.dataclass
 class PBTParams(AlgorithmParams):
     search_space: ParamSpace
@@ -27,7 +29,8 @@ class PBTState(AlgorithmState):
     fitness: chex.Array
     gen_ids: chex.Array
     gen_count: int
-    timestep_count: int = 0
+    timestep_count: int
+    storage: Storage
     
     @property
     def best_fitness(self):
@@ -80,6 +83,12 @@ class PBT(Algorithm):
         
         rngs = jax.random.split(rng_init, self.pop_size)
         states = jax.vmap(self.algo.init_state)(rngs, pop_params.value)
+
+        storage = Storage.create({
+            "state": jax.tree.map(lambda x: x[0], states),
+            "params": jax.tree.map(lambda x: x[0], pop_params.value),
+            "fitness": 0., 
+        }, self.pop_size * self.num_steps)
         
         return PBTState(
             rng=rng,
@@ -89,6 +98,8 @@ class PBT(Algorithm):
             fitness=jnp.full(self.pop_size, -jnp.inf),
             gen_ids=jnp.zeros(self.pop_size, dtype=jnp.int32),
             gen_count=0,
+            timestep_count=0,
+            storage=storage,
         )
     
     def train_impl(self, algo_state: PBTState, params: PBTParams) -> Tuple[PBTState, Any]:
@@ -112,15 +123,17 @@ class PBT(Algorithm):
         
         # train
         cand_states, cand_evaluations = jax.vmap(self.algo.train)(cand_states, cand_params.value)
-        cand_fitness = cand_evaluations.reshape(self.pop_size, -1).mean(axis=-1)
+        cand_fitness = jax.vmap(self.algo.get_fitness)(cand_states, cand_params.value, cand_evaluations) # cand_evaluations.reshape(self.pop_size, -1).mean(axis=-1)
         
+        storage = algo_state.storage.extend({"state": cand_states, "params": cand_params.value, "fitness": cand_fitness})
+
         # jax.debug.print("Intermediate: {}", cand_params.value)
         
         algo_state = self.update_archive(algo_state, cand_states, cand_params, cand_fitness, params)
         
         # jax.debug.print("After: {}", algo_state.params.value)
         
-        return algo_state, cand_evaluations
+        return algo_state.replace(storage=storage), cand_evaluations
     
     def exploit(self, algo_state, params):
         rng, algo_state = algo_state.get_rng()
@@ -158,16 +171,17 @@ class PBT(Algorithm):
                 rng1, rng2 = jax.random.split(rng)
                 y = domain.sample(rng2)
                 return jax.tree.map(lambda a, b: jax.lax.select(jax.random.uniform(rng1) < params.resample_prob, a, b), y, x)
-            return on_resample
+            if domain.is_mutable:
+                return on_resample
+            return lambda rng, x: x
 
         rng_mutate, rng_resample = jax.random.split(rng)
         mut_params = params.search_space.mutate(rng_mutate, ind_params)
-        
+
         return params.search_space.domain_apply(
             resample,
             rng_resample,
             mut_params.params,
-            cond_fn=lambda domain: domain.is_mutable
         )
         
     def update_archive(self, algo_state, cand_states, cand_params, cand_fitness, params=None):
@@ -196,6 +210,18 @@ class PBT(Algorithm):
             gen_ids=ind_gen_ids,
             gen_count=algo_state.gen_count + 1
         )
+
+    def get_best(self, algo_state, algo_params, evaluations):
+        algo = self.algo
+
+        evals = []
+        for agent_id, algo_idx in enumerate(algo_state.params.value.index):
+            evaluation = evaluations[algo_idx]
+            evals.append(evaluation[-1, agent_id].mean())
+            
+        index = jnp.array(evals).argmax()
+        state, params = jax.tree.map(lambda x: x[index], (algo_state.states, algo_state.params.value))
+        return algo, state, params
 
 # ==================
 # REGISTER ALGORITHM

@@ -33,13 +33,17 @@ class RejaxWrapper(Algorithm):
 
     @property
     def default_params(self) -> AlgorithmParams:
-        return self.algo_cls.create(**self.param_kwargs)
+        return self.algo_cls.create(**{"skip_initial_evaluation": True, **self.param_kwargs})
     
     def init_state_impl(self, rng: chex.PRNGKey, params: AlgorithmParams) -> chex.ArrayTree:
         return params.init_state(rng)
     
     def train_impl(self, algo_state: AlgorithmState, params: AlgorithmParams) -> chex.ArrayTree:
-        return params.train(train_state=algo_state)
+        state, evaluations = params.train(train_state=algo_state)
+        return state, evaluations[1]
+
+    def evaluate(self, algo_state, params):
+        return params.eval_callback(params, algo_state, algo_state.rng)[1]
 
 # ==================
 # REGISTER ALGORITHM
